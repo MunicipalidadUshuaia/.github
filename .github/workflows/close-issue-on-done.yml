@@ -1,0 +1,121 @@
+name: Cerrar Issue al Mover a Completado en Project
+on:
+  project_v2_item:
+    types: [edited] # Este workflow se dispara cuando un item (issue/PR) en el Project es editado
+
+jobs:
+  close_issue_if_done:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Permiso para leer el código (necesario para actions/checkout)
+      issues: write # Permiso para cerrar issues
+      pull-requests: write # Permiso para interactuar con pull requests (si también los manejas en el project)
+      # Estos permisos son cruciales para Projects V2.
+      # Si tu Project es de usuario (personal), usa repository_projects: write
+      repository_projects: write
+      # Si tu Project es de organización, usa organization_projects: write
+      # Puedes poner ambos si no estás seguro o el project puede ser de cualquiera de los dos tipos,
+      # aunque usualmente es solo uno el que aplica al contexto del repo.
+      organization_projects: write
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get Project and Item Details and Close Issue
+        id: close_issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Usamos el token automático de GitHub Actions
+          
+        run: |
+          # Solo procesamos eventos de project_v2_item.edited
+          if [ "${{ github.event_name }}" == "project_v2_item" ] && [ "${{ github.event.action }}" == "edited" ]; then
+            
+            ITEM_ID="${{ github.event.project_v2_item.content.node_id }}"
+            ITEM_TYPE="${{ github.event.project_v2_item.content.resource.type }}" # Ej: Issue, PullRequest
+            
+            # Solo actuamos si el item es un Issue
+            if [ "$ITEM_TYPE" == "Issue" ]; then
+              ISSUE_NUMBER="${{ github.event.project_v2_item.content.issue.number }}"
+              ISSUE_STATE="${{ github.event.project_v2_item.content.issue.state }}"
+              PROJECT_ID="${{ github.event.project_v2.node_id }}" # ID del Project V2
+
+              echo "Detectado cambio en Issue #${ISSUE_NUMBER} en Project."
+              echo "Tipo de Item: $ITEM_TYPE, ID: $ITEM_ID"
+              echo "Estado actual del Issue (GitHub): $ISSUE_STATE"
+              echo "Project ID: $PROJECT_ID"
+
+              # Consulta GraphQL para obtener el valor actual del campo de 'status' (columna)
+              # Necesitamos el ID del campo que representa la columna (ej: 'Status')
+              # y el ID de la opción 'Completado'.
+              GRAPHQL_QUERY_GET_FIELD_INFO="
+              query {
+                node(id: \"$PROJECT_ID\") {
+                  ... on ProjectV2 {
+                    item(id: \"$ITEM_ID\") {
+                      fieldValues(first: 20) {
+                        nodes {
+                          ... on ProjectV2ItemFieldSingleSelectValue {
+                            field {
+                              ... on ProjectV2SingleSelectField {
+                                name
+                              }
+                            }
+                            name # Nombre del valor actual (ej. 'Todo', 'In Process', 'Completado')
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }"
+
+              RESPONSE_FIELD_INFO=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                                    -X POST -d "{\"query\": \"$GRAPHQL_QUERY_GET_FIELD_INFO\"}" \
+                                    https://api.github.com/graphql)
+              
+              # Intentamos identificar el campo que actúa como 'columna' o 'estado'.
+              # Por defecto, en Projects V2 este campo suele llamarse 'Status' o 'State'.
+              # Si el nombre de tu columna es diferente (ej. 'Fase', 'Estado Actual'),
+              # ajusta la parte `select(.field.name == "Status" or .field.name == "State" or .field.name == "Estatus")`
+              # para que coincida con el nombre exacto de tu campo de columna.
+              CURRENT_COLUMN_NAME=$(echo "$RESPONSE_FIELD_INFO" | jq -r '.data.node.item.fieldValues.nodes[] | select(.field.name == "Status" or .field.name == "State" or .field.name == "Estatus") | .name // empty')
+              
+              echo "Nombre de la columna actual en el Project: '$CURRENT_COLUMN_NAME'"
+
+              # Condición para cerrar el issue:
+              # 1. Está en la columna "Completado" en el Project.
+              # 2. El Issue está actualmente ABIERTO en GitHub.
+              if [ "$CURRENT_COLUMN_NAME" == "Completado" ] && [ "$ISSUE_STATE" == "OPEN" ]; then
+                echo "Issue #${ISSUE_NUMBER} está en la columna 'Completado' y aún está ABIERTO. Procediendo a cerrarlo..."
+                # Mutación GraphQL para cerrar el issue
+                GRAPHQL_MUTATION_CLOSE_ISSUE="
+                mutation {
+                  closeIssue(input: {issueId: \"$ITEM_ID\"}) {
+                    issue {
+                      number
+                      state
+                    }
+                  }
+                }"
+
+                curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                     -X POST -d "{\"query\": \"$GRAPHQL_MUTATION_CLOSE_ISSUE\"}" \
+                     https://api.github.com/graphql
+                echo "Issue #${ISSUE_NUMBER} cerrado exitosamente."
+              elif [ "$CURRENT_COLUMN_NAME" == "Completado" ] && [ "$ISSUE_STATE" == "CLOSED" ]; then
+                echo "Issue #${ISSUE_NUMBER} ya está en la columna 'Completado' y ya está CERRADO. No se requiere acción."
+              else
+                echo "Issue #${ISSUE_NUMBER} no está en la columna 'Completado' o ya está cerrado. No se requiere acción."
+              fi
+            else
+              echo "El elemento del Project no es un Issue. Es un '$ITEM_TYPE'. No se realizará ninguna acción de cierre."
+            fi
+          else
+            echo "El evento no es de tipo 'project_v2_item.edited'. No se realizará ninguna acción."
+          fi
