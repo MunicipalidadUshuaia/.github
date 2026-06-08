@@ -1,0 +1,6 @@
+blank_issues_enabled: true
+
+contact_links:
+  - name: "💬 Discusiones de la Organización"
+    url: "https://github.com/orgs/MunicipalidadUshuaia/discussions"
+    about: "Si tienes una pregunta general, propuesta o debate que afecte a varios repositorios, hazlo aquí."
